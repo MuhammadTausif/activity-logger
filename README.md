@@ -1,4 +1,4 @@
-# Activity Logger (SQLite, Tkinter) — Technical Documentation (v9)
+# Activity Logger (SQLite, Tkinter) — Technical Documentation (v10)
 
 > **Platform:** Windows 10
 > **Tech:** Python 3.x, Tkinter, SQLite, *(optional)* Matplotlib, Win32 global hotkeys (ctypes)
