@@ -1,9 +1,20 @@
-# Activity Logger (SQLite, Tkinter) — Technical Documentation
+# Activity Logger (SQLite, Tkinter) — Technical Documentation (v9)
 
 > **Platform:** Windows 10
-> **Tech:** Python 3.x, Tkinter, SQLite, Matplotlib, Win32 global hotkeys (ctypes)
+> **Tech:** Python 3.x, Tkinter, SQLite, *(optional)* Matplotlib, Win32 global hotkeys (ctypes)
 > **UI:** Main app (radios + buttons + normal clock) + **transparent overlay clock** (always-on-top, draggable)
 > **Hotkeys:** Ctrl+Alt + (Home / PgUp / PgDn / End / Left) to switch activities
+
+---
+
+## What’s new in this version
+
+* **Live sessions:** a row in `sessions` is created **as soon as an activity starts** and its `end_ts` and `duration_sec` are **updated every minute** (and at stop/switch).
+* **1-minute autosave:** running activity progress is saved to a new per-day aggregate table `daily_totals` **every minute**.
+* **Midnight rollover:** if the app is running across midnight, it **finalizes yesterday’s session at 00:00**, adds the exact remainder to yesterday’s `daily_totals`, and **starts a fresh session** at 00:00 for today.
+* **Daily totals overlay:** a **Toggle Daily Totals** button shows a second (smaller) line under the transparent clock containing **today’s totals per activity**, displayed as **icons** + compact time (e.g., `💼 2m • 📚 0m • 🏠 1m • 🛑 0m • 🧩 17m`).
+* **Icons in the totals line:** names are replaced with their icons for a compact, glanceable display.
+* **Waste rules retained:** selecting *Waste* enlarges the overlay, forces it visible, and recenters it.
 
 ---
 
@@ -23,6 +34,7 @@
    * [Database Methods](#database-methods)
    * [UI Helpers](#ui-helpers)
    * [Activity Control](#activity-control)
+   * [Autosave & Midnight Rollover](#autosave--midnight-rollover)
    * [Overlay Helpers](#overlay-helpers)
    * [Transparent Overlay (Canvas)](#transparent-overlay-canvas)
    * [Clock](#clock)
@@ -38,31 +50,36 @@
 ## Overview
 
 This app is a **time/activity logger** with a clean Tkinter UI and a **transparent, always-on-top** overlay clock.
-Every activity session is saved to **SQLite**. Switching activities **stops & logs** the old session and **starts** the new one automatically.
+Every session is stored in **SQLite**, and **daily totals** are maintained continuously. Switching activities **stops & saves** the old session and **starts** the new one automatically.
 
 ---
 
 ## Features
 
-* Live stopwatch clock (mm\:ss with centiseconds).
+* Live stopwatch clock (HH\:MM\:SS.CC).
 * **Activities as radio buttons**: Work, Study, Break, Waste, Projects (+ Custom).
 * **Auto-start default** activity on launch.
-* **Switching activity** auto-stops and logs previous session.
-* **Transparent overlay clock** (movable, shadow color by activity, small icon before time).
+* **Switch activity** → stop/log previous, start new.
+* **Transparent overlay clock** with a colored shadow, **leading icon**, and a **second line** showing **today’s totals** (toggle).
 * **“Waste” rules**: overlay becomes large, forced visible, and re-centered.
 * **Global hotkeys** (Ctrl+Alt+key) to switch activities without focusing the app.
-* **Dashboard**: table of sessions + total time per activity + bar chart.
+* **1-minute autosave** updates the *running* session and **daily totals**.
+* **Midnight rollover** splits the session exactly at day boundary and continues cleanly.
+* **Dashboard**: table of sessions + all-time totals + *(optional)* bar chart.
 
 ---
 
 ## How to Run
 
 ```bash
+# optional chart support
 pip install matplotlib
+
+# run
 python activity_logger.py
 ```
 
-> **Note:** Global hotkeys use Win32 APIs; run on **Windows**.
+> **Note:** Global hotkeys rely on Win32; use on **Windows**. For silent startup, run with `pythonw.exe`.
 
 ---
 
@@ -82,39 +99,52 @@ CREATE TABLE IF NOT EXISTS sessions (
   id           INTEGER PRIMARY KEY,
   activity_id  INTEGER NOT NULL,
   start_ts     TEXT NOT NULL,   -- "YYYY-MM-DD HH:MM:SS"
-  end_ts       TEXT NOT NULL,
-  duration_sec REAL NOT NULL,   -- e.g., 123.45
+  end_ts       TEXT NOT NULL,   -- updated at least every minute
+  duration_sec REAL NOT NULL,   -- updated at least every minute
+  FOREIGN KEY(activity_id) REFERENCES activities(id) ON DELETE CASCADE
+);
+
+-- NEW: per-day aggregate, updated every minute while an activity runs
+CREATE TABLE IF NOT EXISTS daily_totals (
+  date        TEXT NOT NULL,    -- "YYYY-MM-DD"
+  activity_id INTEGER NOT NULL,
+  seconds     REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (date, activity_id),
   FOREIGN KEY(activity_id) REFERENCES activities(id) ON DELETE CASCADE
 );
 ```
 
-* Default activities are seeded on first run: **Work, Study, Break, Waste, Projects** (+ `Custom` helper entry).
+**Behavioral notes:**
+
+* When an activity starts, a **new row** is inserted into `sessions` with `end_ts = start_ts` and `duration_sec = 0`.
+  While it runs, the same row is **updated every minute** (and on stop/switch/rollover).
+* `daily_totals` is **upserted** every minute: `seconds += elapsed_since_last_autosave`.
 
 ---
 
 ## UI / UX Behavior
 
-* **Main window:**
+* **Main window**
 
   * Big digital clock (non-transparent).
   * Radio buttons for activity selection.
-  * Buttons: **Start**, **Stop**, **Settings**, **Toggle Transparent Clock**.
+  * Buttons: **Start**, **Stop**, **Settings**, **Toggle Transparent Clock**, **Toggle Daily Totals**.
   * Slider: **Overlay size** (24–120 px).
-* **Transparent overlay:**
+* **Transparent overlay**
 
-  * Black digits with a **colored shadow** (e.g., green for Work).
-  * **Small icon/word** prefix (e.g., 💼 for Work).
-  * Draggable; double-click to toggle **unless activity is “Waste”** (forced visible).
-  * Uses `-transparentcolor` (fallback to semi-transparent alpha if unsupported).
+  * Black digits with a **colored shadow** reflecting the current activity.
+  * A **leading icon** for the current activity (e.g., 💼 before the time).
+  * **Daily totals line** (smaller font) under the time, showing **icons** + compact durations (e.g., `💼 2m • 📚 0m • 🏠 1m • 🛑 0m • 🧩 17m`) — toggled by **Toggle Daily Totals**.
+  * Drag anywhere to move; **double-click** to hide/show *(hidden action is blocked when Waste is active)*.
+  * Uses `-transparentcolor` (falls back to `-alpha` if unsupported by Tk build).
 
 ---
 
 ## Hotkeys
 
-> Active while the program is running (Windows only).
-> **Fn** cannot be captured on Windows; combos are **Ctrl+Alt**:
+> Active while the program is running.
 
-| Activity | Keys (Global)           |
+| Activity | Global Keys             |
 | -------- | ----------------------- |
 | Work     | Ctrl + Alt + Home       |
 | Study    | Ctrl + Alt + PageUp     |
@@ -122,43 +152,22 @@ CREATE TABLE IF NOT EXISTS sessions (
 | Waste    | Ctrl + Alt + End        |
 | Projects | Ctrl + Alt + Left Arrow |
 
+*(Fn cannot be captured on Windows; combinations use Ctrl+Alt.)*
+
 ---
 
 ## Color & Icon Mapping
 
-**Shadow color:**
-
-* Work = **green**
-* Study = **blue**
-* Break = **gray**
-* Waste = **red**
-* Projects = **yellow**
-* Other/unknown = gray
-
-**Icon ahead of time (emoji with fallback):**
-
-* Work = 💼 (fallback: WORK)
-* Study = 📚 (fallback: STUDY)
-* Break = 🏠 (fallback: HOME)
-* Waste = 🛑 (fallback: WASTE)
-* Projects = 🧩 (fallback: PROJ)
+* **Shadow colors:** Work=green, Study=blue, Break=gray, Waste=red, Projects=yellow.
+* **Icons:** Work=💼, Study=📚, Break=🏠, Waste=🛑, Projects=🧩.
+  *(Windows uses “Segoe UI Emoji”; fallback text labels are used if emojis aren’t available.)*
 
 ---
 
 ## Configuration Constants
 
 ```python
-DB_FILE = "activity_log.db"
-
 DEFAULT_ACTIVITIES = ["Work", "Study", "Break", "Waste", "Projects"]
-
-COLOR_MAP = {
-    "Work": "green",
-    "Study": "blue",
-    "Break": "gray",
-    "Waste": "red",
-    "Projects": "yellow",
-}
 
 NORMAL_SIZE = 36      # overlay font size for normal activities
 WASTE_SIZE  = 96      # overlay font size when activity = Waste
@@ -170,246 +179,122 @@ WASTE_SIZE  = 96      # overlay font size when activity = Waste
 
 ### Constructor & Lifecycle
 
-#### `__init__(self, root)`
-
-**Purpose:** Build the UI, initialize DB/State, create overlay, start hotkeys, and start the clock loop.
-**Key actions:**
-
-* Connects to SQLite and seeds default activities.
-* Sets state variables for timer and current activity.
-* Creates main UI (clock label, radios, buttons, slider).
-* Auto-selects first non-custom activity and **starts** it.
-* Creates the **transparent overlay**.
-* Starts the **Win32 hotkey** listener in a background thread.
-* Registers `WM_DELETE_WINDOW` handler to clean up.
+`__init__(self, root)`
+Builds the UI; initializes DB and state; creates overlay; starts the hotkey listener thread; wires `WM_DELETE_WINDOW`; kicks off the 10 ms clock loop and the **1-minute autosave loop**.
 
 ---
 
 ### Database Methods
 
-#### `_init_db(self)`
-
-* Creates tables `activities` and `sessions` if they do not exist.
-
-#### `_seed_default_activities(self)`
-
-* Inserts default activities (`DEFAULT_ACTIVITIES`) and ensures `"Custom"` exists.
-
-#### `_load_activities(self) -> list[str]`
-
-* Fetches activity names from DB, returns sorted list **with "Custom" last** (for UI).
-
-#### `_get_or_create_activity(self, name) -> int`
-
-* Ensures an activity row exists; returns its `id`.
+* `_init_db(self)` — Creates `activities`, `sessions`, and **`daily_totals`** tables if missing.
+* `_seed_default_activities(self)` — Inserts default activities and ensures `"Custom"` exists.
+* `_load_activities(self) -> list[str]` — Returns activity names (with `"Custom"` last).
+* `_get_or_create_activity(self, name) -> int` — Upserts an activity and returns its id.
 
 ---
 
 ### UI Helpers
 
-#### `_build_activity_radios(self)`
-
-* Rebuilds radio buttons from the DB list.
-* Each radio button `command` → `_switch_activity`.
-
-#### `_first_non_custom_activity(self) -> str`
-
-* Returns the first activity that isn’t `"Custom"`.
-* Fallback: `"Work"`.
+* `_build_activity_radios(self)` — Rebuilds the radio list; each radio triggers `_switch_activity`.
+* `_first_non_custom_activity(self) -> str` — Returns the first non-custom activity (fallback: `"Work"`).
 
 ---
 
 ### Activity Control
 
-#### `_start_activity(self, name)`
+* `_start_activity(self, name)`
 
-**Purpose:** Stop/log the previous session and start a new one.
-**Flow:**
+  * Finalizes any running session.
+  * Sets state, records `start_timestamp`, and **creates a new row in `sessions`** (`end_ts=start_ts`, `duration_sec=0`), remembering its `id`.
+  * Applies overlay policy (Waste=visible+big+center; others=small) and re-renders overlay.
 
-1. `_save_previous_activity_if_running()` to finalize prior activity.
-2. Set `current_activity_name/id`, `running=True`, `start_time=now`, `start_timestamp`.
-3. Apply **overlay policy**:
+* `_save_previous_activity_if_running(self)`
 
-   * If `name == "Waste"`:
+  * **Finalizes the current session row** (updates `end_ts`/`duration_sec` one last time; clears live `session_id`).
 
-     * `_ensure_overlay_visible()`
-     * `_apply_overlay_size(WASTE_SIZE)`
-     * `_position_overlay_default()` (top-center)
-   * Else:
+* `_switch_activity(self)`
 
-     * `_apply_overlay_size(NORMAL_SIZE)`
-4. Re-render overlay text.
+  * Handles `"Custom"` creation or starts the selected activity (stop old, start new).
 
-**Side effects:** Inserts into DB when switching from a running activity.
+* `start(self)` / `stop(self)`
 
-#### `_save_previous_activity_if_running(self)`
+  * Manual start/stop; **stop** forces a final autosave and finalizes the session row.
 
-* If a session is running, computes duration and inserts a row into `sessions`.
+---
 
-#### `_switch_activity(self)`
+### Autosave & Midnight Rollover
 
-* Triggered by radio selection.
-* If `"Custom"` is selected:
+* `_schedule_autosave(self)` / `_autosave_tick(self)` / `_do_autosave(self)`
 
-  * Shows dialog to enter a name; creates activity; rebuilds radios; starts it.
-* Otherwise, calls `_start_activity(selected)`.
+  * Every minute, compute elapsed since the last tick and:
 
-#### `start(self)`
+    1. **Upsert into `daily_totals`** for *today* (`seconds += delta`).
+    2. **Update the live session row** (`end_ts`, `duration_sec`).
+    3. Refresh overlay (so the daily line stays current).
 
-* Manual start (if not already running) for the current radio-selected activity.
+* `_rollover_midnight_if_needed(self, reference_dt, now_dt)`
 
-#### `stop(self)`
+  * If the date changed between ticks:
 
-* Manual stop; finalizes current session via `_save_previous_activity_if_running()`.
+    * Compute **seconds to midnight**, add them to **yesterday’s** `daily_totals`.
+    * **Finalize** the current session row **exactly at midnight**.
+    * **Start a new session** at today’s 00:00 with the same activity and create a fresh `sessions` row.
+    * Return the new “reference” timestamp (midnight) for the next autosave delta.
 
 ---
 
 ### Overlay Helpers
 
-#### `_ensure_overlay_visible(self)`
-
-* Creates the overlay window if it doesn’t exist.
-
-#### `_position_overlay_default(self)`
-
-* Positions overlay near the **top-center** of the primary screen.
-* Called automatically when activity = **Waste**.
-
-#### `_apply_overlay_size(self, size)`
-
-* Updates time font size, syncs the slider, recalculates metrics, and requests re-render.
-
-#### `_on_overlay_size_change(self, value)`
-
-* Slider callback → calls `_apply_overlay_size()`.
+* `toggle_overlay(self)` — Hide/show overlay; **refuses to hide** while *Waste* is active.
+* `toggle_daily_totals(self)` — Show/hide the **daily totals** second line.
+* `_ensure_overlay_visible(self)`, `_position_overlay_default(self)` — Manage overlay existence/placement (top-center).
+* `_apply_overlay_size(self, size)` / `_on_overlay_size_change(self, value)` — Resize main time font and rebuild the icon/daily-line fonts; re-render.
 
 ---
 
 ### Transparent Overlay (Canvas)
 
-#### `_create_overlay(self)`
+* `_create_overlay(self)` — Creates a **frameless** `Toplevel` with per-color transparency (fallback to alpha), packs a `Canvas`, positions it, and draws initial content. Wires drag and double-click.
+* `_render_overlay_text(self, text)` — Draws:
 
-**Purpose:** Create the borderless, transparent, always-on-top overlay.
-**Key details:**
+  * **Line 1:** current activity **icon** + stopwatch time (colored shadow + black foreground).
+  * **Line 2 (optional):** **today’s totals** as *icons* + compact time, separated by bullets.
+* Supporting helpers:
 
-* Uses `-transparentcolor` if available; else fallback to `-alpha`.
-* Creates a `Canvas` and binds:
-
-  * **Drag** (`<ButtonPress-1>`, `<B1-Motion>`) → move window
-  * **Double-click** to toggle (blocked if activity = Waste)
-* Calls `_position_overlay_default()` and initial `_render_overlay_text()`.
-
-#### `toggle_overlay(self)`
-
-* Hides/shows the overlay.
-* **Refuses** to hide when activity = **Waste**.
-
-#### `_start_move(self, event)`
-
-* Stores initial click position for dragging.
-
-#### `_do_move(self, event)`
-
-* Repositions overlay window during drag.
-
-#### `_activity_shadow_color(self) -> str`
-
-* Returns color based on `current_activity_name` using `COLOR_MAP` (default gray).
-
-#### `_activity_icon(self) -> str`
-
-* Returns emoji/icon string for current activity (fallback text if needed).
-
-#### `_icon_size_for(self, time_font_size) -> int`
-
-* Returns a smaller font size for the icon (\~40% of main time size, min 12px).
-
-#### `_make_icon_font(self, size) -> tkfont.Font`
-
-* Attempts to use **Segoe UI Emoji** (Windows). Falls back to **Consolas**.
-
-#### `_render_overlay_text(self, text)`
-
-**Purpose:** Draws the **colored shadow** + **black foreground** for the icon and time.
-**Steps:**
-
-1. Compute paddings, offsets, and the **gap** between icon and time.
-2. Measure icon and time with **different fonts**.
-3. Resize canvas to content.
-4. Draw **shadow** at `(x+offset, y+offset)` using `_activity_shadow_color()`.
-5. Draw **foreground** text in **black** at `(x, y)`.
+  * `_activity_shadow_color(self)` — color by activity.
+  * `_activity_icon(self)` / `_icon_for_name(self)` — emoji or fallback for current/specified activity.
+  * `_icon_size_for(self, time_font_size)` — icon size relative to the main time font.
+  * `_sub_size_for(self, time_font_size)` — daily totals line font size (smaller).
+  * `_make_icon_font(self, size)` — uses “Segoe UI Emoji” (fallback: Consolas).
+  * Dragging: `_start_move(self, event)`, `_do_move(self, event)`.
 
 ---
 
 ### Clock
 
-#### `_current_time_text(self) -> str`
-
-* Formats current elapsed time as `"HH:MM:SS.CC"`.
-* If not running, shows `00:00:00.00`.
-
-#### `_update_clock(self)`
-
-* Updates:
-
-  * Main window clock label.
-  * Transparent overlay content (via `_render_overlay_text()`).
-* Reschedules itself every **10 ms** with `root.after(10, ...)`.
+* `_current_time_text(self)` — Formats elapsed time as `HH:MM:SS.CC`.
+* `_update_clock(self)` — Safety-checks date flips; updates the main label and overlay text every **10 ms**.
 
 ---
 
 ### Dashboard
 
-#### `open_settings(self)`
-
-* Builds a new **Toplevel** window.
-* Runs a join query to fetch `sessions` with `activity` names.
-* **Treeview** table (Activity, Start, End, Duration).
-* **Summary** totals per activity (minutes).
-* **Matplotlib bar chart** visualizing totals.
+* `open_settings(self)` — Builds a **Toplevel** with a `Treeview` of `sessions` and **all-time totals**.
+  If Matplotlib is available, shows a **bar chart**; otherwise shows a prompt to install it.
 
 ---
 
 ### Global Hotkeys (Win32)
 
-> Implemented using `ctypes` with `RegisterHotKey` and a background message loop.
-
-#### `_register_hotkeys(self)`
-
-* Registers:
-
-  * Work → Ctrl+Alt+Home
-  * Study → Ctrl+Alt+PageUp
-  * Break → Ctrl+Alt+PageDown
-  * Waste → Ctrl+Alt+End
-  * Projects → Ctrl+Alt+Left
-
-#### `_unregister_hotkeys(self)`
-
-* Unregisters all hotkeys (called when the thread exits).
-
-#### `_hotkey_loop(self)`
-
-* Runs on a **background thread**.
-* Creates a Win32 **message loop** (`GetMessageW`, `DispatchMessageW`).
-* On `WM_HOTKEY`, posts back to Tk’s main thread: `root.after(0, self._on_hotkey, hk_id)`.
-
-#### `_on_hotkey(self, hk_id)`
-
-* Maps ID → activity name, sets radio selection, and calls `_start_activity(name)`.
+* `_register_hotkeys(self)` / `_unregister_hotkeys(self)` — Register/unregister Ctrl+Alt global hotkeys.
+* `_hotkey_loop(self)` — Win32 message loop on a background thread; forwards hotkeys into Tk’s main loop.
+* `_on_hotkey(self, hk_id)` — Maps hotkey to activity and starts it.
 
 ---
 
 ### Cleanup
 
-#### `_on_close(self)`
-
-* Posts `WM_QUIT` to the hotkey thread, so it can exit cleanly and **unregister** hotkeys.
-* Saves any running session.
-* Closes DB connection.
-* Destroys Tk root window.
-
-> The destructor also attempts to save+close as a last line of defense.
+* `_on_close(self)` — Posts `WM_QUIT` to the hotkey thread, **forces a final autosave**, **finalizes the session**, closes DB, and destroys Tk.
 
 ---
 
@@ -418,43 +303,39 @@ WASTE_SIZE  = 96      # overlay font size when activity = Waste
 **On launch**
 
 1. Init DB → seed activities → build UI → create overlay → start hotkey thread.
-2. Select first non-custom activity, **start** it.
-3. Clock updates every 10 ms.
+2. Select first non-custom activity and **start** it (create live session row).
+3. Start: 10 ms clock loop + **1-minute autosave** loop.
 
-**On radio change**
+**While running (every minute)**
 
-* If **Custom**: prompt, create, select, start.
-* Else: **stop+log old**, **start new**.
-* If new = **Waste**: enlarge overlay, force visible, **recenter**.
+* Add elapsed seconds to `daily_totals` (today).
+* Update the live session row’s `end_ts`/`duration_sec`.
+* If date flips → **rollover** at midnight and continue.
 
-**On hotkey**
+**On radio change / hotkey**
 
-* Same as radio change (switch, log, start).
+* Stop & finalize old session row → start new session row.
+* Apply Waste overlay rules if applicable.
 
-**On Stop**
+**On Stop / Exit**
 
-* Finalizes and logs the running session.
-
-**On Settings**
-
-* Opens dashboard (table + totals + bar chart).
+* Final autosave → finalize session row → close DB.
 
 ---
 
 ## Extending the App
 
-* **Per-activity sizes**: Create a `settings` table and store last-used overlay size per activity.
-* **Daily/weekly rollups**: Add GROUP BY day/week queries and charts.
-* **CSV export**: Dump `sessions` to CSV from the dashboard.
-* **Idle detection**: Pause/flag sessions after inactivity using mouse/keyboard hooks.
+* **Per-activity preferred sizes** (remember last overlay size per activity) via a small `settings` table.
+* **Daily view in Settings**: add a date picker with per-day totals (icons + chart).
+* **CSV export** for sessions and/or daily totals.
+* **Idle detection** to auto-pause or mark time as Waste after inactivity.
 
 ---
 
 ## Known Limitations
 
-* **Windows-only hotkeys** (uses Win32). The rest of the app works cross-platform, but hotkeys will not.
-* `-transparentcolor` support depends on **Tk build**. The app falls back to semi-transparent `-alpha` if needed.
-* Emoji rendering depends on fonts (Windows has **Segoe UI Emoji**). Fallback text is provided.
+* **Windows-only** global hotkeys (uses Win32).
+* `-transparentcolor` depends on your Tk build (fallback to `-alpha` used when unavailable).
+* Emoji rendering relies on system fonts (Windows: **Segoe UI Emoji**). Fallback labels are provided.
 
 ---
-
